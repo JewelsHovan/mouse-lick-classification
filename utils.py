@@ -47,11 +47,12 @@ def compare_dimensions(train_data_element, train_folder, label_folder, verbose=F
 
 
 def test_gentleboost(
-    n_samples=15000,
-    n_features=150,
-    n_informative=50,
+    n_samples=10000,
+    n_features=100,
+    n_informative=20,
     test_size=0.2,
     random_state=42,
+    profile=False,
     **model_params
 ):
     """
@@ -87,8 +88,10 @@ def test_gentleboost(
     # Initialize and train model
     from gentleboost import GentleBoost
     model = GentleBoost(**model_params)
-
-    # Time the training
+    if profile:
+        model.profile_fit(X_train, y_train)
+    
+    # Time the training 
     train_start = time()
     model.fit(X_train, y_train)
     train_time = time() - train_start
@@ -96,8 +99,7 @@ def test_gentleboost(
     # Time the prediction
     predict_start = time()
     y_pred = model.predict(X_test)
-    predict_time = time() - predict_start
-
+    predict_time = time() - predict_start   
     # Calculate metrics
     metrics = {
         'accuracy': accuracy_score(y_test, y_pred),

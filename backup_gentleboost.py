@@ -1,8 +1,11 @@
 import numpy as np
-from decisionstump import DecisionStump
+from sklearn.tree import DecisionTreeRegressor
 from sklearn.base import clone, BaseEstimator, ClassifierMixin
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from joblib import Parallel, delayed
+from numba import njit
 from cython_utils import update_sample_weights, compute_loss
 import cProfile
 import pstats
@@ -26,13 +29,12 @@ def map_to_range(predictions, lower=-1, upper=1):
 class GentleBoost(BaseEstimator, ClassifierMixin):
     def __init__(self, base_estimator=None, n_estimators=50, learning_rate=1.0,
                  min_samples_split=2, min_samples_leaf=1, max_depth=1,
-                 validation_fraction=0.1, n_iter_no_change=5, tol=1e-4, verbose=0, 
-                 random_state=None, sliding_window_size=3, learning_rate_decay=0.1,
-                 n_jobs=-1):
+                 validation_fraction=0.1, n_iter_no_change=5, tol=1e-4, verbose=0, random_state=None,
+                 sliding_window_size=3, learning_rate_decay=0.1):
         """
-        GentleBoost constructor with DecisionStump as default base estimator
+        GentleBoost constructor
         """
-        self.base_estimator = DecisionStump() if base_estimator is None else base_estimator
+        self.base_estimator = base_estimator
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
         self.min_samples_split = min_samples_split
@@ -45,7 +47,6 @@ class GentleBoost(BaseEstimator, ClassifierMixin):
         self.random_state = random_state
         self.sliding_window_size = sliding_window_size
         self.learning_rate_decay = learning_rate_decay  # New parameter for adaptive learning rate
-        self.n_jobs = n_jobs
 
         self.models = []  # To store weak learners
         self.train_scores = []  # Training losses
@@ -60,19 +61,42 @@ class GentleBoost(BaseEstimator, ClassifierMixin):
 
     def _fit_single_estimator(self, m, X_train, y_train, sample_weights, X_val=None, y_val=None):
         """
-        Optimized single estimator fitting using DecisionStump
+        Fit a single estimator with batch processing for large datasets.
         """
-        # Create a new instance of DecisionStump for each estimator
-        model = clone(self.base_estimator)
+        batch_size = 10000  # Adjust based on your memory constraints
+        n_samples = X_train.shape[0]
         
-        # Fit the stump with sample weights
-        model.fit(X_train, y_train, sample_weights)
+        model = DecisionTreeRegressor(
+            max_depth=self.max_depth,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            random_state=self.random_state)
         
-        # Use memory-efficient prediction and ensure float64 dtype
-        predictions_train = model.predict(X_train).astype(np.float64)
-        predictions_val = model.predict(X_val).astype(np.float64) if X_val is not None else None
+        if n_samples > batch_size:
+            # Process in batches for prediction only
+            model.fit(X_train, y_train, sample_weight=sample_weights)
+            
+            # Batch predictions to save memory
+            predictions_train = np.zeros(n_samples, dtype=np.float32)
+            for i in range(0, n_samples, batch_size):
+                batch_end = min(i + batch_size, n_samples)
+                predictions_train[i:batch_end] = model.predict(
+                    X_train[i:batch_end]).astype(np.float32)
+            
+            predictions_val = None
+            if X_val is not None:
+                n_val_samples = X_val.shape[0]
+                predictions_val = np.zeros(n_val_samples, dtype=np.float32)
+                for i in range(0, n_val_samples, batch_size):
+                    batch_end = min(i + batch_size, n_val_samples)
+                    predictions_val[i:batch_end] = model.predict(
+                        X_val[i:batch_end]).astype(np.float32)
+        else:
+            # Original code for smaller datasets
+            model.fit(X_train, y_train, sample_weight=sample_weights)
+            predictions_train = model.predict(X_train).astype(np.float32)
+            predictions_val = model.predict(X_val).astype(np.float32) if X_val is not None else None
 
-        # In-place operations for memory efficiency
         map_to_range(predictions_train)
         if predictions_val is not None:
             map_to_range(predictions_val)
@@ -81,87 +105,97 @@ class GentleBoost(BaseEstimator, ClassifierMixin):
 
     def fit(self, X, y):
         """
-        Memory-optimized fit method with parallel processing
+        Memory-optimized fit method.
         """
         # Pre-allocate arrays with proper data types
-        X = np.asarray(X, dtype=np.float64)
-        y = np.asarray(y, dtype=np.float64)
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32)
         
-        # Store unique classes and convert y to -1/1
+        # Use memory-efficient data structures
+        self.models = []
+        self.train_scores = np.zeros(self.n_estimators, dtype=np.float32)
+        self.val_scores = np.zeros(self.n_estimators, dtype=np.float32)
+        self.learning_rates_ = np.zeros(self.n_estimators, dtype=np.float32)
+        
+        # Pre-compute learning rates
+        for m in range(self.n_estimators):
+            self.learning_rates_[m] = self._get_adaptive_learning_rate(m)
+        
+        # Store the unique classes and their original labels
         self.classes_ = np.unique(y)
-        y = np.where(y == self.classes_[0], -1.0, 1.0).astype(np.float64)
         
-        # Split data efficiently
+        # Convert y to -1 and 1 for boosting (ensure float32)
+        y = np.where(y == self.classes_[0], -1.0, 1.0).astype(np.float32)
+        
+        n_samples = X.shape[0]
+
+        # Efficient data splitting using numpy operations and random state
+        rng = np.random.default_rng(self.random_state)
         if self.validation_fraction > 0.0:
-            split_idx = int(len(X) * (1 - self.validation_fraction))
-            indices = np.random.permutation(len(X))
+            split_idx = int(n_samples * (1 - self.validation_fraction))
+            indices = rng.permutation(n_samples)
             X_train, X_val = X[indices[:split_idx]], X[indices[split_idx:]]
             y_train, y_val = y[indices[:split_idx]], y[indices[split_idx:]]
         else:
             X_train, y_train = X, y
             X_val, y_val = None, None
 
-        # Pre-allocate arrays with float64
-        n_train = len(X_train)
-        self.models = []
-        self.train_scores = np.zeros(self.n_estimators, dtype=np.float64)
-        self.val_scores = np.zeros(self.n_estimators, dtype=np.float64)
-        self.learning_rates_ = np.zeros(self.n_estimators, dtype=np.float64)
-        
-        # Initialize weights and F scores with float64
-        sample_weights = np.ones(n_train, dtype=np.float64) / n_train
-        F_train = np.zeros(n_train, dtype=np.float64)
-        F_val = np.zeros(len(y_val), dtype=np.float64) if X_val is not None else None
+        # Pre-allocate arrays
+        sample_weights = np.ones(len(y_train), dtype=np.float32) / len(y_train)
+        F_train = np.zeros(len(y_train), dtype=np.float32)
+        if X_val is not None:
+            F_val = np.zeros(len(y_val), dtype=np.float32)
 
-        # Early stopping variables
         best_val_loss = np.inf
         no_improvement_count = 0
-        val_loss_window = []
+        val_loss_history = []
 
         for m in range(self.n_estimators):
-            # Get current learning rate
-            current_lr = self._get_adaptive_learning_rate(m)
-            self.learning_rates_[m] = current_lr  # Store the learning rate
+            current_lr = self.learning_rates_[m]
             
-            # Fit single estimator
             model, predictions_train, predictions_val = self._fit_single_estimator(
                 m, X_train, y_train, sample_weights, X_val, y_val)
-            
-            # Update model state
-            self.models.append(model)
+
             F_train += current_lr * predictions_train
-            
-            # Update sample weights using Cython implementation
             sample_weights = update_sample_weights(y_train, predictions_train, current_lr)
             
-            # Compute losses using Cython implementation
-            self.train_scores[m] = compute_loss(y_train, F_train)
+            self.models.append(model)
             
+            loss_train = compute_loss(y_train, F_train)
+            self.train_scores[m] = loss_train
+
             if X_val is not None:
                 F_val += current_lr * predictions_val
-                val_loss = compute_loss(y_val, F_val)
-                self.val_scores[m] = val_loss
-                
-                # Early stopping check with sliding window
-                val_loss_window.append(val_loss)
-                if len(val_loss_window) > self.sliding_window_size:
-                    val_loss_window.pop(0)
-                val_loss_avg = np.mean(val_loss_window)
-                
-                if val_loss_avg < best_val_loss - self.tol:
+                loss_val = compute_loss(y_val, F_val)
+                self.val_scores[m] = loss_val
+
+                # Sliding window average for validation loss
+                val_loss_history.append(loss_val)
+                if len(val_loss_history) > self.sliding_window_size:
+                    val_loss_avg = np.mean(val_loss_history[-self.sliding_window_size:])
+                else:
+                    val_loss_avg = np.mean(val_loss_history)
+
+                # Early stopping logic
+                if best_val_loss - val_loss_avg > self.tol:
                     best_val_loss = val_loss_avg
                     no_improvement_count = 0
                 else:
                     no_improvement_count += 1
-                    
-                if no_improvement_count >= self.n_iter_no_change:
-                    if self.verbose:
+
+                if self.verbose > 0:
+                    print(f"Iteration {m + 1}/{self.n_estimators}, "
+                          f"Training Loss: {loss_train:.6f}, "
+                          f"Validation Loss: {loss_val:.6f} (avg: {val_loss_avg:.6f})")
+
+                if no_improvement_count >= self.n_iter_no_change // 2:
+                    if self.verbose > 0:
                         print(f"Early stopping at iteration {m + 1}")
                     break
-
-            if self.verbose and m % 10 == 0:
-                print(f"Iteration {m + 1}/{self.n_estimators}, "
-                      f"Training Loss: {self.train_scores[m]:.6f}")
+            else:
+                if self.verbose > 0:
+                    print(f"Iteration {m + 1}/{self.n_estimators}, "
+                          f"Training Loss: {loss_train:.6f}")
 
         return self
 
@@ -327,22 +361,18 @@ class GentleBoost(BaseEstimator, ClassifierMixin):
 if __name__ == "__main__":
     from utils import test_gentleboost
     model_params = {
-        'n_estimators': 100,  # Reduced from 100
+        'n_estimators': 100,
         'learning_rate': 0.1,
         'learning_rate_decay': 0.1,
-        'max_depth': 1,      # Reduced from 3
+        'max_depth': 3,
         'validation_fraction': 0.1,
-        'n_iter_no_change': 5,
+        'n_iter_no_change': 10,
         'tol': 1e-4,
         'verbose': 1,
-        'random_state': 42,
-        'n_jobs': -1
+        'random_state': 42
     }
     
-    # Add print statement to show progress
-    print("Starting test...")
     results = test_gentleboost(**model_params, profile=True)
-    print("Test completed!")
     
     print("\nPerformance Metrics:")
     print(f"Accuracy: {results['accuracy']:.4f}")

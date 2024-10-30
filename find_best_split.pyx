@@ -56,6 +56,11 @@ cpdef find_best_split(np.ndarray[DTYPE_t, ndim=1] X_feature,
         np.ndarray[DTYPE_t, ndim=1] sorted_y = y[sort_idx]
         np.ndarray[DTYPE_t, ndim=1] sorted_weights = sample_weight[sort_idx]
 
+    # Use memoryviews for sorted arrays
+    cdef double[:] sorted_feature_view = sorted_feature
+    cdef double[:] sorted_y_view = sorted_y
+    cdef double[:] sorted_weights_view = sorted_weights
+
     # Pre-compute weighted values using NumPy operations
     cdef:
         np.ndarray[DTYPE_t, ndim=1] weighted_y = sorted_y * sorted_weights

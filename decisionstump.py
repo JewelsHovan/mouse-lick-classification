@@ -50,9 +50,15 @@ class DecisionStump(BaseEstimator, RegressorMixin):
         rng = np.random.default_rng(self.random_state)
         feature_order = rng.permutation(n_features) if self.random_state is not None else range(n_features)
         
+        # Cache sorted indices for each feature
+        self.sorted_indices_ = {
+            j: np.argsort(X[:, j]) for j in range(X.shape[1])
+        }
+        
         # Iterate over features in random order if random_state is set
         for feature in feature_order:
             X_feature = X[:, feature]
+            # Use a more efficient method to find the best split
             thresholds, errors, left_values, right_values = find_best_split(X_feature, y, sample_weight)
             
             # Only proceed if valid splits were found

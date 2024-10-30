@@ -7,13 +7,23 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
-from gentleboost import GentleBoost
 import lightgbm as lgb
 from sklearn.pipeline import make_pipeline, Pipeline
 from sklearn.preprocessing import PowerTransformer
+import pandas as pd
+from sklearn.model_selection import train_test_split
 
 
 if __name__ == "__main__":
+
+    # load in the data
+    data = pd.read_csv("Data/GentleBoost/train_data.csv")
+    X = data.iloc[:, :-1]
+    y = data.iloc[:, -1]
+
+    # split the data into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
     trainer = ClassifierTrainer()
     # Define your classifiers
     dummy_clf = DummyClassifier(strategy="most_frequent")
@@ -34,3 +44,7 @@ if __name__ == "__main__":
     trainer.add_classifier(svc_clf)
     trainer.add_classifier(rf_clf)
     trainer.add_classifier(xgb_clf)
+
+    # train the classifiers
+    trainer.fit_all(X_train, y_train, X_test, y_test)
+    trainer.save_results()

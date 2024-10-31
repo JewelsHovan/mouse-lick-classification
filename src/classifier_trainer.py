@@ -10,6 +10,9 @@ from sklearn.pipeline import Pipeline
 from sklearn.base import BaseEstimator
 from typing import List, Dict, Any
 from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.exceptions import ConvergenceWarning
+import warnings
 
 
 class ClassifierTrainer:
@@ -33,6 +36,7 @@ class ClassifierTrainer:
         ])
         self.classifiers = []
         self.results_csv_path = results_csv_path
+        self.scaler = StandardScaler()  # Add scaler for numerical stability
 
     def log_execution_time(func):
         """
@@ -94,34 +98,53 @@ class ClassifierTrainer:
                            X_test: np.ndarray, y_test: np.ndarray, 
                            estimator: BaseEstimator, cv: int = 5) -> Dict[str, Any]:
         """
-        Trains and evaluates a single classifier.
-
-        :param X_train: Training features.
-        :param y_train: Training labels.
-        :param X_test: Testing features.
-        :param y_test: Testing labels.
-        :param estimator: The classifier to train.
-        :param cv: Number of cross-validation folds.
-        :return: A dictionary containing evaluation metrics.
+        Updated training and evaluation with better error handling and preprocessing
         """
-        cv_scores = cross_val_score(estimator, X_train, y_train, cv=cv, scoring='accuracy')
-        cv_accuracy = cv_scores.mean()
-        print(f"Cross-Validation Accuracy: {cv_accuracy:.4f} ± {cv_scores.std():.4f}")
+        # Scale the data if it's not already a pipeline
+        if not isinstance(estimator, Pipeline):
+            X_train_scaled = self.scaler.fit_transform(X_train)
+            X_test_scaled = self.scaler.transform(X_test)
+        else:
+            X_train_scaled = X_train
+            X_test_scaled = X_test
 
-        estimator.fit(X_train, y_train)
+        # Suppress convergence warnings for specific classifiers
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=ConvergenceWarning)
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            
+            try:
+                cv_scores = cross_val_score(estimator, X_train_scaled, y_train, 
+                                          cv=cv, scoring='accuracy')
+                cv_accuracy = cv_scores.mean()
+                print(f"Cross-Validation Accuracy: {cv_accuracy:.4f} ± {cv_scores.std():.4f}")
 
-        train_accuracy = estimator.score(X_train, y_train)
-        print(f"Training Accuracy: {train_accuracy:.4f}")
+                estimator.fit(X_train_scaled, y_train)
 
-        test_accuracy = estimator.score(X_test, y_test)
-        print(f"Test Accuracy: {test_accuracy:.4f}")
+                train_accuracy = estimator.score(X_train_scaled, y_train)
+                print(f"Training Accuracy: {train_accuracy:.4f}")
 
-        y_pred = estimator.predict(X_test)
+                test_accuracy = estimator.score(X_test_scaled, y_test)
+                print(f"Test Accuracy: {test_accuracy:.4f}")
 
-        precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-        recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
-        print(f"Precision: {precision:.4f}")
-        print(f"Recall: {recall:.4f}")
+                y_pred = estimator.predict(X_test_scaled)
+
+                precision = precision_score(y_test, y_pred, average='weighted', 
+                                         zero_division=0)
+                recall = recall_score(y_test, y_pred, average='weighted', 
+                                    zero_division=0)
+                print(f"Precision: {precision:.4f}")
+                print(f"Recall: {recall:.4f}")
+
+            except Exception as e:
+                print(f"Error during training/evaluation: {str(e)}")
+                return {
+                    'cv_accuracy': 0.0,
+                    'train_accuracy': 0.0,
+                    'test_accuracy': 0.0,
+                    'precision': 0.0,
+                    'recall': 0.0
+                }
 
         return {
             'cv_accuracy': cv_accuracy,
@@ -142,16 +165,19 @@ class ClassifierTrainer:
     def train_all(self, X_train: np.ndarray, y_train: np.ndarray, 
                   X_test: np.ndarray, y_test: np.ndarray):
         """
-        Trains and evaluates all added classifiers.
-
-        :param X_train: Training features.
-        :param y_train: Training labels.
-        :param X_test: Testing features.
-        :param y_test: Testing labels.
+        Updated train_all method with better progress tracking
         """
-        for clf in self.classifiers:
-            print(f"\nTraining and evaluating {clf.__class__.__name__}...")
-            self.train_and_evaluate(X_train, y_train, X_test, y_test, clf)
+        total_classifiers = len(self.classifiers)
+        for idx, clf in enumerate(self.classifiers, 1):
+            print(f"\nTraining classifier {idx}/{total_classifiers}: {clf.__class__.__name__}...")
+            try:
+                self.train_and_evaluate(X_train, y_train, X_test, y_test, clf)
+            except Exception as e:
+                print(f"Error training {clf.__class__.__name__}: {str(e)}")
+                continue
+        
+        # Save results after all training is complete
+        self.save_results()
 
     def plot_results(self, baseline_accuracy: float = None):
         """

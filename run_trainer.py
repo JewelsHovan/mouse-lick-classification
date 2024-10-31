@@ -24,13 +24,14 @@ if __name__ == "__main__":
     # split the data into training and testing sets
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    trainer = ClassifierTrainer()
+    trainer = ClassifierTrainer(results_csv_path="classifier_results.csv")
     # Define your classifiers
     dummy_clf = DummyClassifier(strategy="most_frequent")
     gnb_clf = make_pipeline(PowerTransformer(), GaussianNB(var_smoothing=1e-8))
     knn_clf = KNeighborsClassifier(n_neighbors=5)
-    lr_clf = LogisticRegression(max_iter=1000, random_state=42)
-    mlp_clf = MLPClassifier(max_iter=1000, random_state=42)
+    lr_clf = LogisticRegression(max_iter=2000, random_state=42)
+    mlp_clf = MLPClassifier(max_iter=2000, random_state=42, 
+                           early_stopping=True, validation_fraction=0.1)
     svc_clf = SVC(kernel='rbf', random_state=42)
     rf_clf = RandomForestClassifier(n_estimators=200, max_depth=5, random_state=42)
     xgb_clf = XGBClassifier(n_estimators=250, max_depth=4, random_state=42)
@@ -46,5 +47,5 @@ if __name__ == "__main__":
     trainer.add_classifier(xgb_clf)
 
     # train the classifiers
-    trainer.fit_all(X_train, y_train, X_test, y_test)
+    trainer.train_all(X_train, y_train, X_test, y_test)
     trainer.save_results()
